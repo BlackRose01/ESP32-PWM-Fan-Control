@@ -2,14 +2,12 @@
 
 A small script to control and monitor a 4-pin PWN fan via MQTT. The microcontroller sends the temperature, humidity, fan speed (RPM) and measure timestamp to the MQTT Broker. The speed of the fan (0% - 100%) will be automatically set by the measured temperature and humidity. It will calculate a percent value between a predefined MIN and MAX and afterwards get the mean value of both values.
 
-> Currently Work in Progess (WiP) due to missing microcontroller. First I tried it with an ESP8266 (Wemos D1 Mini and Wemos D1 Mini Pro) but the I2C bus does not recognize connected sensors after the first loop.
-
 ## Bill of Material
-* ESP32 with WLAN
+* ESP32 with WLAN (ESP32 D1 Mini)
 * Wires
 * 2.2 kOhm Resistor
 * +5V 4-pin PWM fan (e.g. Noctua NF-12 5V PWM)
-* SHT31 (e.g. Adafruit SHT31)
+* SHT31-D (e.g. Adafruit SHT31-D)
 
 ## Wire Plan
 A detailed plan how the sensores and devices will be connected can be found in the PDF file in this repository.
