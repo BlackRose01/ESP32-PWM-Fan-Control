@@ -6,11 +6,16 @@
 
 #include <Arduino.h>
 #include <Wire.h>
+#include <ESPmDNS.h>
 #include <Adafruit_SHT31.h>
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include <WiFiClient.h>
+#include <WiFiUdp.h>
+#include <ArduinoOTA.h>
+#include <NTPClient.h>
 
+#define DNS_NAME "pflanzi-vitrine-fan-1"
 #define WIFI_SSID ""
 #define WIFI_PASS ""
 
@@ -18,6 +23,7 @@
 #define MQTT_PORT 1883
 #define MQTT_TOPIC "pflanzi/vitrine"
 
+#define SENSOR_TEMP_TOL 2.0
 #define MAX_TEMP 24
 #define MIN_TEMP 18
 #define MAX_HUM 70
@@ -27,26 +33,24 @@
 #define RPM_PIN 16
 #define MIN_FAN_SPEED_PERCENT 0
 
-#define LOOP_DELAY 60
+#define LOOP_DELAY 20
 
 bool enableHeater = false;
 int counter = 0;
 int tmp_speed = 100;
 bool tmp_speed_changed = true;
+bool ignore_delay = false;
 
 WiFiClient net;
+WiFiUDP ntpUDP;
 PubSubClient mqtt(net);
 Adafruit_SHT31 sht31 = Adafruit_SHT31();
+NTPClient timeClient(ntpUDP);
 
 /**
- * Callback for incoming MQTT messages
+ * MQTT Callback function for fan speed
  */
-void mqttCallback(char* topic, byte* payload, unsigned int length) {
-  Serial.print("Message arrived [");
-  Serial.print(topic);
-  Serial.print("] ");
-  Serial.println();
-
+void mqttCbSpeed(byte* payload, unsigned int length) {
   String speed = "";
   
   for (int i = 0; i < length; i++) {
@@ -65,16 +69,38 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 }
 
 /**
+ * MQTT Callback function for fan speed
+ */
+void mqttCbIgnoreDelay(byte* payload, unsigned int length) {
+  char a = (char)payload[0];
+
+  if (a == '1') {
+    ignore_delay = true;
+  } else {
+    ignore_delay = false;
+  }
+}
+
+/**
+ * Callback for incoming MQTT messages
+ */
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  if (topic == "pflanzi/vitrine/speed") {
+     mqttCbSpeed(payload, length);
+  } else if (topic == "pflanzi/vitrine/delay") {
+    mqttCbIgnoreDelay(payload, length);
+  }
+}
+
+/**
  * Reconnect to MQTT Broker
  */
 void reconnectMqtt() {
   // Loop until we're reconnected
   while (!mqtt.connected()) {
-    Serial.print("Attempting MQTT connection...");
+    Serial.print(".");
     // Attempt to connect
-    if (mqtt.connect("esp_fan_1")) {
-      Serial.println("connected");
-    } else {
+    if (!mqtt.connect("esp_fan_1")) {
       Serial.print("failed, rc=");
       Serial.print(mqtt.state());
       Serial.println(" try again in 5 seconds");
@@ -84,6 +110,7 @@ void reconnectMqtt() {
   }
 
   mqtt.subscribe("pflanzi/vitrine/speed");
+  mqtt.subscribe("pflanzi/vitrine/delay");
 }
 
 /**
@@ -95,16 +122,68 @@ void setup() {
 
   // Connect WiFi
   WiFi.begin(WIFI_SSID, WIFI_PASS);
-  Serial.print("Connecting to WiFi ..");
+  Serial.print("Connecting to WiFi");
   while (WiFi.status() != WL_CONNECTED) {
     Serial.print('.');
     delay(1000);
   }
+  Serial.println("\t[finished]");
+
+  // Configure NTP
+  Serial.print("Configure NTP");
+  timeClient.begin();
+  Serial.println("\t\t[finished]");
+
+  // Register DNS name
+  Serial.print("Configure MDNS");
+  while(!MDNS.begin(DNS_NAME)) {
+    Serial.println("Error setting up MDNS responder!");
+    delay(1000);
+  }
+  Serial.println("\t\t[finished]");
+
+  // Configure OTA
+  Serial.print("Configure OTA");
+  ArduinoOTA.setPort(3232);
+  ArduinoOTA.setHostname(DNS_NAME);
+  ArduinoOTA.setPasswordHash("ba4a46b504499d817cd51eefc3a1c7be6a957292");
+
+  ArduinoOTA
+    .onStart([]() {
+      String type;
+      if (ArduinoOTA.getCommand() == U_FLASH)
+        type = "sketch";
+      else // U_SPIFFS
+        type = "filesystem";
+
+      // NOTE: if updating SPIFFS this would be the place to unmount SPIFFS using SPIFFS.end()
+      Serial.println("Start updating " + type);
+    })
+    .onEnd([]() {
+      Serial.println("\nEnd");
+    })
+    .onProgress([](unsigned int progress, unsigned int total) {
+      Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+    })
+    .onError([](ota_error_t error) {
+      Serial.printf("Error[%u]: ", error);
+      if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
+      else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
+      else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
+      else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
+      else if (error == OTA_END_ERROR) Serial.println("End Failed");
+    });
+  ArduinoOTA.begin();
+  
+  Serial.println("\t\t[finished]");
+
 
   // Connect MQTT
+  Serial.print("Configure MQTT");
   mqtt.setServer(MQTT_SERVER, MQTT_PORT);
   mqtt.setCallback(mqttCallback);
   reconnectMqtt();
+  Serial.println("\t\t[finished]");
 
   // Configure SHT31
   sht31.begin();
@@ -183,8 +262,6 @@ void mqPublish(const char * topic, String message) {
  * Build the JSON message
  */
 String buildMessage(double t, double h, int speed) {
-  unsigned long timestamp = 0L;
-  
   String data = "{";
   data += "\"temperature\": ";
   data += String(t);
@@ -195,61 +272,34 @@ String buildMessage(double t, double h, int speed) {
   data += ", \"heater_enabled\": ";
   data += String(enableHeater);
   data += ", \"timestamp\": ";
-  data += String(timestamp);
+  data += timeClient.getEpochTime();
   data += "}";
 
   return data;
 }
-
-/**
- * Scans I2C bus and output if a device is connected
- */
-void devices() {
-  byte error, address;
-  int nDevices;
- 
-  Serial.println("Scanning...");
- 
-  nDevices = 0;
-  for(address = 1; address < 127; address++ ) 
-  {
- 
-    Wire.beginTransmission(address);
-    error = Wire.endTransmission();
- 
-    if (error == 0)
-    {
-      Serial.print("I2C device found at address 0x");
-      if (address<16) 
-        Serial.print("0");
-      Serial.print(address,HEX);
-      Serial.println("  !");
- 
-      nDevices++;
-    }
-    else if (error==4) 
-    {
-      Serial.print("Unknow error at address 0x");
-      if (address<16) 
-        Serial.print("0");
-      Serial.println(address,HEX);
-    }    
-  }
-  if (nDevices == 0)
-    Serial.println("No I2C devices found\n");
-  else
-    Serial.println("done\n");
-}
  
 void loop() {
+  // Update NTP
+  while(!timeClient.update()) {
+    timeClient.forceUpdate();
+  }
+
+  // Handle OTA update
+  ArduinoOTA.handle();
+
+  // Handle MQTT subscribtion
+  if (!mqtt.connected()) {
+    reconnectMqtt();
+  }
   mqtt.loop();
-  // devices();
 
   // Get current temperature, humidity and fan speed
-  float currTemp = sht31.readTemperature();
+  float currTemp = sht31.readTemperature() - SENSOR_TEMP_TOL;
   float currHum = sht31.readHumidity();
   int speed = getFanSpeedRpm() * 1.1;
-  // setFanSpeedPercent(tmp_speed);
+
+  // Update fan speed
+  setFanSpeedPercent(calcFanSpeed(currTemp, currHum));
   
   // Publish MQTT message with current measurements
   mqPublish(MQTT_TOPIC, buildMessage(currTemp, currHum, speed));
@@ -260,7 +310,7 @@ void loop() {
   }
 
   // Activate heater on SHT31 after 30 loops
-  if (counter >= 30) {
+  if (counter >= 10) {
     enableHeater = !enableHeater;
     sht31.heater(enableHeater);
     counter = 0;
@@ -268,5 +318,7 @@ void loop() {
 
   counter++;
 
-  delay(LOOP_DELAY * 1000);
+  if (!ignore_delay) {
+    delay(LOOP_DELAY * 1000);
+  }
 }
