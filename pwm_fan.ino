@@ -33,6 +33,9 @@
 #define RPM_PIN 16
 #define MIN_FAN_SPEED_PERCENT 0
 
+#define FAN_SLEEP_START_HOUR 22
+#define FAN_SLEEP_STOP_HOUR 7
+
 #define LOOP_DELAY 20
 
 bool enableHeater = false;
@@ -277,6 +280,21 @@ String buildMessage(double t, double h, int speed) {
 
   return data;
 }
+
+/**
+ * Check if fan should be in standby (turned off)
+ */
+bool isStandby() {
+  // get current hour
+  int currHour = timeClient.getHours();
+
+  // check if current hour is in standby time range
+  if (currHour >= FAN_SLEEP_START_HOUR || currHour < FAN_SLEEP_STOP_HOUR) {
+    return true;
+  } else {
+    return false;
+  }
+}
  
 void loop() {
   // Update NTP
@@ -293,15 +311,19 @@ void loop() {
   }
   mqtt.loop();
 
-  // Get current temperature, humidity and fan speed
+  // Get current temperature and humidity
   float currTemp = sht31.readTemperature() - SENSOR_TEMP_TOL;
   float currHum = sht31.readHumidity();
-  int speed = getFanSpeedRpm() * 1.1;
 
-  // Update fan speed
-  setFanSpeedPercent(calcFanSpeed(currTemp, currHum));
+  // Check if fan shoudl be in standby and update fan speed
+  if (!isStandby()) {
+    setFanSpeedPercent(calcFanSpeed(currTemp, currHum));
+  } else {
+    setFanSpeedPercent(0);
+  }
   
-  // Publish MQTT message with current measurements
+  // Get current fan speed and publish MQTT message with current measurements
+  int speed = getFanSpeedRpm() * 1.1;
   mqPublish(MQTT_TOPIC, buildMessage(currTemp, currHum, speed));
 
   if (tmp_speed_changed) {
